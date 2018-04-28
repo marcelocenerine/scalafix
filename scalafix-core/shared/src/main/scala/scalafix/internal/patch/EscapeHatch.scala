@@ -108,6 +108,7 @@ object EscapeHatch {
     .warning("", "Unused Scalafix suppression. This can be removed")
     .withOwner(RuleName("UnusedScalafixSuppression"))
 
+  private type EscapeOffset = Int
   private type EscapeTree = TreeMap[EscapeOffset, List[EscapeFilter]]
 
   private case class EscapeFilter(
@@ -117,12 +118,6 @@ object EscapeHatch {
       endOffset: Option[EscapeOffset] = None) {
     def matches(id: RuleName): Boolean =
       id.identifiers.exists(i => matcher.matches(i.value))
-  }
-
-  private case class EscapeOffset(offset: Int)
-
-  private object EscapeOffset {
-    implicit val ordering: Ordering[EscapeOffset] = Ordering.by(_.offset)
   }
 
   def apply(tree: Tree, associatedComments: AssociatedComments): EscapeHatch =
@@ -146,10 +141,10 @@ object EscapeHatch {
     def isEnabled(
         ruleName: RuleName,
         position: Int): (Boolean, Option[EscapeFilter]) = {
-      val escapesUpToPos = escapeTree.to(EscapeOffset(position)).values.flatten
+      val escapesUpToPos = escapeTree.to(position).values.flatten
       val maybeFilter = escapesUpToPos.find {
         case f @ EscapeFilter(_, _, _, Some(end))
-            if f.matches(ruleName) && end.offset >= position =>
+            if f.matches(ruleName) && end >= position =>
           true
         case _ => false
       }
@@ -171,8 +166,8 @@ object EscapeHatch {
       val builder = TreeMap.newBuilder[EscapeOffset, List[EscapeFilter]]
 
       def addAnnotatedEscape(t: Tree, mods: List[Mod]): Unit = {
-        val start = EscapeOffset(t.pos.start)
-        val end = EscapeOffset(t.pos.end)
+        val start = t.pos.start
+        val end = t.pos.end
         val rules = extractRules(mods)
         val (matchAll, matchOne) = rules.partition(_._1 == SuppressAll)
         val filters = ListBuffer.empty[EscapeFilter]
@@ -262,14 +257,14 @@ object EscapeHatch {
       var culprit = Option.empty[EscapeFilter]
       val isDisabled = {
         val disablesUpToPos =
-          disabling.to(EscapeOffset(position)).values.flatten
+          disabling.to(position).values.flatten
         disablesUpToPos.exists { disableFilter =>
           val isDisabled = disableFilter.matches(ruleName)
           if (isDisabled) culprit = Some(disableFilter)
 
           isDisabled && {
             val enablesRange = enabling
-              .range(disableFilter.startOffset, EscapeOffset(position))
+              .range(disableFilter.startOffset, position)
               .values
               .flatten
             !enablesRange.exists { enableFilter =>
@@ -322,11 +317,9 @@ object EscapeHatch {
         if (splittedRules.isEmpty) { // wildcard
           List(EscapeFilter(FilterMatcher.matchEverything, anchor.pos, offset))
         } else {
-          rulesExactPosition(splittedRules, anchor)
-            .map {
-              case (rule, pos) =>
-                EscapeFilter(FilterMatcher(rule), pos, offset)
-            }
+          rulesExactPosition(splittedRules, anchor).map {
+            case (rule, pos) => EscapeFilter(FilterMatcher(rule), pos, offset)
+          }
         }
       }
 
@@ -383,8 +376,8 @@ object EscapeHatch {
           //
           case comment @ Token.Comment(FilterExpression(rules)) =>
             if (!visitedFilterExpression.contains(comment.pos)) {
-              disable(EscapeOffset(t.pos.start), comment, rules)
-              enable(EscapeOffset(t.pos.end), comment, rules)
+              disable(t.pos.start, comment, rules)
+              enable(t.pos.end, comment, rules)
               visitedFilterExpression += comment.pos
             }
 
@@ -401,7 +394,7 @@ object EscapeHatch {
             // ...
             //
             case FilterDisable(rules) =>
-              disable(EscapeOffset(comment.pos.start), comment, rules)
+              disable(comment.pos.start, comment, rules)
               trackUnusedRules(comment, rules, enabled = false)
 
             // matches on anchors
@@ -410,7 +403,7 @@ object EscapeHatch {
             // // scalafix:on RuleA
             //
             case FilterEnable(rules) =>
-              enable(EscapeOffset(comment.pos.start), comment, rules)
+              enable(comment.pos.start, comment, rules)
               trackUnusedRules(comment, rules, enabled = true)
 
             // matches expressions not handled by AssociatedComments
@@ -421,13 +414,9 @@ object EscapeHatch {
             case FilterExpression(rules) =>
               if (!visitedFilterExpression.contains(comment.pos)) {
                 // we approximate the position of the expression to the whole line
-                val position = Position.Range(
-                  comment.pos.input,
-                  comment.pos.start - comment.pos.startColumn,
-                  comment.pos.end
-                )
-                disable(EscapeOffset(position.start), comment, rules)
-                enable(EscapeOffset(position.end), comment, rules)
+                val start = comment.pos.start - comment.pos.startColumn
+                disable(start, comment, rules)
+                enable(comment.pos.end, comment, rules)
               }
 
             case _ => ()

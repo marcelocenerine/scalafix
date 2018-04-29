@@ -288,7 +288,7 @@ object EscapeHatch {
       val disableBuilder = TreeMap.newBuilder[EscapeOffset, List[EscapeFilter]]
       val unusedAnchoredEnable = List.newBuilder[Position]
       val visitedFilterExpression = mutable.Set.empty[Position]
-      var currentlyDisabledRules = Map.empty[String, Position]
+      var currentlyDisabledRules = Set.empty[String]
 
       def enable(
           rules: String,
@@ -345,21 +345,20 @@ object EscapeHatch {
           anchor: Token.Comment,
           rules: String,
           enabled: Boolean): Unit = {
-        val rulesToPos = getRulesExactPosition(splitRules(rules), anchor)
+        val rules0 = splitRules(rules)
+        val rulesToPos = getRulesExactPosition(rules0, anchor)
 
         if (enabled) {
-          if (currentlyDisabledRules.isEmpty && rulesToPos.isEmpty) { // wildcard
+          if (currentlyDisabledRules.isEmpty && rules0.isEmpty) { // wildcard
             unusedAnchoredEnable += anchor.pos
           } else {
-            val disabledRules = currentlyDisabledRules.keySet
             rulesToPos.foreach {
-              case (rule, pos) if !disabledRules(rule) =>
-                unusedAnchoredEnable += pos
-              case _ => ()
+              case (rule, pos) =>
+                if (!currentlyDisabledRules(rule)) unusedAnchoredEnable += pos
             }
           }
         } else {
-          currentlyDisabledRules ++= rulesToPos
+          currentlyDisabledRules ++= rules0
         }
       }
 

@@ -23,8 +23,10 @@ object AnnotationUnused {
 
   @SuppressWarnings(Array("scalafix:NoDummy")) // assert: UnusedScalafixSuppression
   object Foo {
-
     @SuppressWarnings(Array("all")) // OK, not prefixed
     def bar = ???
   }
+
+  @SuppressWarnings(Array("""scalafix:NoDummy""")) // assert: UnusedScalafixSuppression
+  def e = ()
 }

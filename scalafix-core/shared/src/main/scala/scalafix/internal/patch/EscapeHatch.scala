@@ -163,36 +163,30 @@ object EscapeHatch {
     val OptionalRulePrefix = "scalafix:"
 
     def apply(tree: Tree): AnnotatedEscapes = {
-      val builder = TreeMap.newBuilder[EscapeOffset, List[EscapeFilter]]
+      val escapes =
+        tree.collect {
+          case t @ Mods(mods) if hasSuppressWarnings(mods) =>
+            val start = t.pos.start
+            val end = t.pos.end
+            val rules = extractRules(mods)
+            val (matchAll, matchOne) = rules.partition(_._1 == SuppressAll)
+            val filters = ListBuffer.empty[EscapeFilter]
 
-      def addAnnotatedEscape(t: Tree, mods: List[Mod]): Unit = {
-        val start = t.pos.start
-        val end = t.pos.end
-        val rules = extractRules(mods)
-        val (matchAll, matchOne) = rules.partition(_._1 == SuppressAll)
-        val filters = ListBuffer.empty[EscapeFilter]
+            // 'all' takes precedence over individual rules so that we can warn unused rules later
+            for ((_, rulePos) <- matchAll) {
+              val matcher = FilterMatcher.matchEverything
+              filters += EscapeFilter(matcher, rulePos, start, Some(end))
+            }
+            for ((rule, rulePos) <- matchOne) {
+              val unprefixedRuleName = rule.stripPrefix(OptionalRulePrefix)
+              val matcher = FilterMatcher(unprefixedRuleName)
+              filters += EscapeFilter(matcher, rulePos, start, Some(end))
+            }
 
-        // 'all' should come before individual rules so that we can warn unused rules later
-        for ((_, rulePos) <- matchAll) {
-          val matcher = FilterMatcher.matchEverything
-          filters += EscapeFilter(matcher, rulePos, start, Some(end))
+            (start -> filters.result())
         }
-        for ((rule, rulePos) <- matchOne) {
-          val unprefixedRuleName = rule.stripPrefix(OptionalRulePrefix)
-          val matcher = FilterMatcher(unprefixedRuleName)
-          filters += EscapeFilter(matcher, rulePos, start, Some(end))
-        }
 
-        builder += (start -> filters.result())
-      }
-
-      tree.foreach {
-        case t @ Mods(mods) if hasSuppressWarnings(mods) =>
-          addAnnotatedEscape(t, mods)
-        case _ => ()
-      }
-
-      new AnnotatedEscapes(builder.result())
+      new AnnotatedEscapes(TreeMap(escapes: _*))
     }
 
     private def hasSuppressWarnings(mods: List[Mod]): Boolean =
@@ -317,7 +311,7 @@ object EscapeHatch {
         if (splittedRules.isEmpty) { // wildcard
           List(EscapeFilter(FilterMatcher.matchEverything, anchor.pos, offset))
         } else {
-          rulesExactPosition(splittedRules, anchor).map {
+          getRulesExactPosition(splittedRules, anchor).map {
             case (rule, pos) => EscapeFilter(FilterMatcher(rule), pos, offset)
           }
         }
@@ -326,7 +320,7 @@ object EscapeHatch {
       def splitRules(rules: String): List[String] =
         rules.trim.split("\\s*,\\s*").toList
 
-      def rulesExactPosition(
+      def getRulesExactPosition(
           rules: List[String],
           anchor: Token.Comment): List[(String, Position)] = {
         val rulesToPos = ListBuffer.empty[(String, Position)]
@@ -347,7 +341,7 @@ object EscapeHatch {
           anchor: Token.Comment,
           rules: String,
           enabled: Boolean): Unit = {
-        val rulesToPos = rulesExactPosition(splitRules(rules), anchor)
+        val rulesToPos = getRulesExactPosition(splitRules(rules), anchor)
 
         if (enabled) {
           if (currentlyDisabledRules.isEmpty && rulesToPos.isEmpty) { // wildcard

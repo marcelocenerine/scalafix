@@ -11,7 +11,14 @@ package test.escapeHatch
 /* scalafix:off */ // assert: UnusedScalafixSuppression
 /* scalafix:off NoDummy */ // assert: UnusedScalafixSuppression
 /* scalafix:off NoDummy */ // assert: UnusedScalafixSuppression
-// scalafix:on NoDummy
+/* scalafix:on NoDummy */
+/* scalafix:on NoDummy */ // assert: UnusedScalafixSuppression
+/* scalafix:on NoDummy */ // assert: UnusedScalafixSuppression
+/* scalafix:on NoDummy */ // assert: UnusedScalafixSuppression
+/* scalafix:on */
+/* scalafix:on */ // assert: UnusedScalafixSuppression
+/* scalafix:on */ // assert: UnusedScalafixSuppression
+/* scalafix:on */ // assert: UnusedScalafixSuppression
 
 object AnchorDoubleOn {
   object Dummy // assert: NoDummy

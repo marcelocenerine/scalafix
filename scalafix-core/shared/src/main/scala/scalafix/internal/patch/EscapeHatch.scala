@@ -196,7 +196,7 @@ object EscapeHatch {
     private def extractRules(mods: List[Mod]): List[(String, Position)] = {
       def process(rules: List[Term]) = rules.collect {
         case lit @ Lit.String(rule) =>
-          // get the exact position of the rule name (drop surrounding quotes)
+          // get the exact position of the rule name
           val lo = lit.pos.start + lit.pos.text.indexOf(rule)
           val hi = lo + rule.length
           rule -> Position.Range(lit.pos.input, lo, hi)
@@ -235,7 +235,7 @@ object EscapeHatch {
   private class AnchoredEscapes private (
       enabling: EscapeTree,
       disabling: EscapeTree,
-      unusedEnable: List[Position]) {
+      unused: List[Position]) {
 
     /**
       * a rule r is disabled in position p if there is a comment disabling r at
@@ -272,8 +272,7 @@ object EscapeHatch {
     }
 
     def unusedEscapes(used: collection.Set[EscapeFilter]): Iterable[Position] =
-      unusedEnable ++
-        disabling.valuesIterator.flatten.filterNot(used).map(_.cause)
+      unused ++ disabling.valuesIterator.flatten.filterNot(used).map(_.cause)
   }
 
   private object AnchoredEscapes {
@@ -281,85 +280,65 @@ object EscapeHatch {
     private val FilterEnable = "\\s?scalafix:on\\s?(.*)".r
     private val FilterExpression = "\\s?scalafix:ok\\s?(.*)".r
 
+    private type Rule2Pos = (String, Position)
+
     def apply(
         tree: Tree,
         associatedComments: AssociatedComments): AnchoredEscapes = {
       val enableBuilder = TreeMap.newBuilder[EscapeOffset, List[EscapeFilter]]
       val disableBuilder = TreeMap.newBuilder[EscapeOffset, List[EscapeFilter]]
-      val unusedAnchoredEnable = List.newBuilder[Position]
       val visitedFilterExpression = mutable.Set.empty[Position]
-      var currentlyDisabledRules = Set.empty[String]
+      val unusedTracker = new UnusedOnOffTracker
 
       def enable(
-          rules: String,
+          rulesPos: List[Rule2Pos],
           start: EscapeOffset,
           end: Option[EscapeOffset],
           anchor: Token.Comment): Unit =
-        enableBuilder += (start -> makeFilters(start, end, anchor, rules))
+        enableBuilder += (start -> makeFilters(start, end, anchor, rulesPos))
 
       def disable(
-          rules: String,
+          rulesPos: List[Rule2Pos],
           start: EscapeOffset,
           end: Option[EscapeOffset],
           anchor: Token.Comment): Unit =
-        disableBuilder += (start -> makeFilters(start, end, anchor, rules))
+        disableBuilder += (start -> makeFilters(start, end, anchor, rulesPos))
 
       def makeFilters(
           start: EscapeOffset,
           end: Option[EscapeOffset],
           anchor: Token.Comment,
-          rules: String): List[EscapeFilter] = {
-        val splitRules0 = splitRules(rules)
-
-        if (splitRules0.isEmpty) { // wildcard
+          rulesPos: List[Rule2Pos]): List[EscapeFilter] = {
+        if (rulesPos.isEmpty) { // wildcard
           EscapeFilter(FilterMatcher.matchEverything, anchor.pos, start, end) :: Nil
         } else {
-          getRulesExactPosition(splitRules0, anchor).map {
+          rulesPos.map {
             case (rule, pos) =>
               EscapeFilter(FilterMatcher(rule), pos, start, end)
           }
         }
       }
 
-      def splitRules(rules: String): List[String] =
-        rules.trim.split("\\s*,\\s*").toList
+      def splitRules(rules: String): List[String] = {
+        val trimmed = rules.trim
+        if (trimmed.isEmpty) Nil else trimmed.split("\\s*,\\s*").toList
+      }
 
-      def getRulesExactPosition(
-          rules: List[String],
-          anchor: Token.Comment): List[(String, Position)] = {
-        val rulesToPos = ListBuffer.empty[(String, Position)]
+      def rulesWithPosition(
+          rules: String,
+          anchor: Token.Comment): List[Rule2Pos] = {
+        val rulesPos = ListBuffer.empty[Rule2Pos]
         var fromIdx = 0
 
-        for (rule <- rules) {
+        for (rule <- splitRules(rules)) {
           val idx = anchor.text.indexOf(rule, fromIdx)
           val startPos = anchor.start + idx
           val endPos = startPos + rule.length
           val pos = Position.Range(anchor.input, startPos, endPos)
           fromIdx = idx + rule.length
-          rulesToPos += (rule -> pos)
+          rulesPos += (rule -> pos)
         }
-        rulesToPos.result()
-      }
-
-      def trackUnusedRules(
-          anchor: Token.Comment,
-          rules: String,
-          enabled: Boolean): Unit = {
-        val rules0 = splitRules(rules)
-        val rulesToPos = getRulesExactPosition(rules0, anchor)
-
-        if (enabled) {
-          if (currentlyDisabledRules.isEmpty && rules0.isEmpty) { // wildcard
-            unusedAnchoredEnable += anchor.pos
-          } else {
-            rulesToPos.foreach {
-              case (rule, pos) =>
-                if (!currentlyDisabledRules(rule)) unusedAnchoredEnable += pos
-            }
-          }
-        } else {
-          currentlyDisabledRules ++= rules0
-        }
+        rulesPos.result()
       }
 
       tree.foreach { t =>
@@ -373,7 +352,8 @@ object EscapeHatch {
           //
           case comment @ Token.Comment(FilterExpression(rules))
               if !visitedFilterExpression.contains(comment.pos) =>
-            disable(rules, t.pos.start, Some(t.pos.end), comment)
+            val rulesPos = rulesWithPosition(rules, comment)
+            disable(rulesPos, t.pos.start, Some(t.pos.end), comment)
             visitedFilterExpression += comment.pos
 
           case _ => ()
@@ -389,8 +369,9 @@ object EscapeHatch {
             // ...
             //
             case FilterDisable(rules) =>
-              disable(rules, comment.pos.start, None, comment)
-              trackUnusedRules(comment, rules, enabled = false)
+              val rulesPos = rulesWithPosition(rules, comment)
+              disable(rulesPos, comment.pos.start, None, comment)
+              unusedTracker.trackOff(rulesPos, comment)
 
             // matches on anchors
             //
@@ -398,8 +379,9 @@ object EscapeHatch {
             // // scalafix:on RuleA
             //
             case FilterEnable(rules) =>
-              enable(rules, comment.pos.start, None, comment)
-              trackUnusedRules(comment, rules, enabled = true)
+              val rulesPos = rulesWithPosition(rules, comment)
+              enable(rulesPos, comment.pos.start, None, comment)
+              unusedTracker.trackOn(rulesPos, comment)
 
             // matches expressions not handled by AssociatedComments
             //
@@ -408,9 +390,10 @@ object EscapeHatch {
             // }
             case FilterExpression(rules)
                 if !visitedFilterExpression.contains(comment.pos) =>
+              val rulesPos = rulesWithPosition(rules, comment)
               // we approximate the position of the expression to the whole line
               val start = comment.pos.start - comment.pos.startColumn
-              disable(rules, start, Some(comment.pos.end), comment)
+              disable(rulesPos, start, Some(comment.pos.end), comment)
 
             case _ => ()
           }
@@ -421,7 +404,67 @@ object EscapeHatch {
       new AnchoredEscapes(
         enableBuilder.result(),
         disableBuilder.result(),
-        unusedAnchoredEnable.result())
+        unusedTracker.allUnused)
+    }
+
+    private class UnusedOnOffTracker {
+      sealed trait Selection
+      case object AllRules extends Selection
+      case class SomeRules(names: Set[String] = Set()) extends Selection
+
+      private val unused = List.newBuilder[Position]
+      private var currentlyOn: Selection = AllRules
+      private var currentlyOff: Selection = SomeRules()
+
+      def trackOn(rulesPos: List[Rule2Pos], anchor: Token.Comment): Unit = {
+        val (off, on) = update(rulesPos, anchor, currentlyOff, currentlyOn)
+        currentlyOff = off
+        currentlyOn = on
+      }
+
+      def trackOff(rulesPos: List[Rule2Pos], anchor: Token.Comment): Unit = {
+        val (on, off) = update(rulesPos, anchor, currentlyOn, currentlyOff)
+        currentlyOn = on
+        currentlyOff = off
+      }
+
+      private def update(
+          rulesPos: List[Rule2Pos],
+          anchor: Token.Comment,
+          current: Selection,
+          desired: Selection): (Selection, Selection) =
+        rulesPos match {
+          case Nil => // wildcard
+            (current, desired) match {
+              case (SomeRules(cur), AllRules) if cur.isEmpty =>
+                unused += anchor.pos // everything already in the desired state
+              case _ =>
+            }
+            (SomeRules(), AllRules)
+
+          case _ => // specific rules
+            (current, desired) match {
+              case (AllRules, SomeRules(des)) =>
+                var ndes = des
+                rulesPos.foreach {
+                  case (rule, pos) =>
+                    if (!ndes(rule)) ndes += rule else unused += pos
+                }
+                (AllRules, SomeRules(ndes))
+
+              case (SomeRules(cur), AllRules) =>
+                var ncur = cur
+                rulesPos.foreach {
+                  case (rule, pos) =>
+                    if (ncur(rule)) ncur -= rule else unused += pos
+                }
+                (SomeRules(ncur), AllRules)
+
+              case p => p // should never reach here
+            }
+        }
+
+      def allUnused: List[Position] = unused.result()
     }
   }
 }
